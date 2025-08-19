@@ -327,5 +327,8 @@ def transpile_line(line: str) -> str:
         return f"// unsupported: {lhs} = {rhs}"
 
 if __name__ == "__main__":
-    lines = [l for l in sys.stdin.read().splitlines() if l.strip()]
+    if len(sys.argv) > 1:
+        lines = [l for l in sys.argv[1:] if l.strip()]
+    else:
+        lines = [l for l in sys.stdin.read().splitlines() if l.strip()]
     print("\n\n".join(transpile_line(l) for l in lines))

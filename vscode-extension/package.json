@@ -1,0 +1,25 @@
+{
+  "name": "pseudocode-to-awl",
+  "displayName": "Pseudocode to AWL",
+  "description": "Translate pseudocode lines to AWL on Enter.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onLanguage:pseudocode"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "pseudocode",
+        "aliases": ["Pseudocode"],
+        "extensions": [".pseudo"],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  }
+}
