@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pseudo ⇄ AWL Converter</title>
+  <style>
+    :root { --bg:#1e1e1e; --panel:#2a2a2a; --muted:#888; --fg:#f1f1f1; --border:#3a3a3a; --accent:#007acc; }
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;height:100%}
+    body{font-family:Consolas,"Courier New",monospace;font-size:13px;line-height:1.4;background:var(--bg);color:var(--fg);display:flex;flex-direction:column}
+    header{padding:8px 14px;display:flex;gap:12px;align-items:center;border-bottom:1px solid var(--border);background:#252525}
+    header h1{margin:0;font-size:15px;flex:1;color:var(--fg);font-weight:500}
+    header .pill{padding:2px 6px;border:1px solid var(--border);border-radius:3px;color:var(--muted);font-size:11px}
+    main{flex:1;display:flex;flex-direction:column}
+    .grid{flex:1;display:grid;grid-template-columns:1fr 1fr;height:100%}
+    .col{display:flex;flex-direction:column;height:100%}
+    .card{background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;height:100%}
+    .card:last-child{border-right:none}
+    .card header{padding:5px 10px;background:#2f2f2f;border-bottom:1px solid var(--border)}
+    .card header h2{margin:0;font-size:12px;font-weight:600;text-transform:uppercase;color:var(--muted)}
+    textarea{flex:1;width:100%;resize:none;padding:10px;background:#1e1e1e;color:var(--fg);border:none;outline:none;font-family:Consolas,"Courier New",monospace;font-size:13px;line-height:1.45;white-space:pre}
+    .toolbar{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:5px 10px;border-top:1px solid var(--border);background:#252525}
+    button{background:#333;color:var(--fg);border:1px solid var(--border);padding:5px 8px;border-radius:3px;cursor:pointer;font-size:12px}
+    button:hover{background:#3d3d3d;border-color:var(--accent)}
+    button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+    .swap{border:1px dashed var(--border);background:#2a2a2a}
+    .muted{color:var(--muted);font-size:11px}
+    .status{font-size:12px;color:#8f8}
+    @media (max-width:980px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Pseudo ⇄ AWL Converter</h1>
+    <span class="pill">client‑side</span>
+    <span class="pill">two‑way</span>
+    <span class="pill">confidential</span>
+  </header>
+
+  <main>
+    <div class="grid">
+      <div class="col card">
+        <header><h2>Pseudocode</h2></header>
+        <textarea id="pseudo" spellcheck="false"></textarea>
+        <div class="toolbar">
+          <div class="left">
+            <button id="toAwl" class="primary">→ To AWL</button>
+            <button id="clearPseudo" title="Clear pseudocode">Clear</button>
+          </div>
+          <div class="right">
+            <label class="muted"><input type="checkbox" id="autoPseudo" checked> Auto</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="col card">
+        <header><h2>AWL</h2></header>
+        <textarea id="awl" spellcheck="false"></textarea>
+        <div class="toolbar">
+          <div class="left">
+            <button id="toPseudo" class="primary">← To Pseudocode</button>
+            <button id="clearAwl" title="Clear AWL">Clear</button>
+          </div>
+          <div class="right">
+            <label class="muted"><input type="checkbox" id="autoAwl"> Auto</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="left">
+        <button id="swap" class="swap" title="Swap panes" hidden>Swap ⇄</button>
+        <span class="muted">Reverse conversion works best on AWL produced here. Hand-written or unusual AWL may not translate correctly. Tool made by https://github.com/timbelmon.</span>
+      </div>
+      <div class="right"><span id="status" class="status"></span></div>
+    </div>
+  </main>
+
+<script>
+// -------- AST-based emitter to fix ACC + boolean issues --------
+const isNumber = (tok) => /^[+-]?\d+(?:[.]\d+)?(?:[eE][+-]?\d+)?$/.test(tok);
+const isRealLike = (tok) => /[.eE]/.test(tok);
+const stripComment = (s) => s.split("//",1)[0];
+
+// precedence maps
+const PREC = {'u-':4,'*':3,'/':3,'+':2,'-':2};
+const CMP  = new Set(['==','!=','<','<=','>','>=']);
+const LOGOPS = new Set(['and','or']);
+const LOGPREC = { 'u!':4, 'and':1, 'or':0 };
+
+// --- helpers to avoid undefined pops
+function pop1(st, op){
+  const a = st.pop();
+  if (!a) throw new Error(`syntax error: missing operand for unary '${op}'`);
+  return a;
+}
+function pop2(st, op){
+  const right = st.pop(), left = st.pop();
+  if (!left || !right) throw new Error(`syntax error: missing operand(s) for '${op}'`);
+  return {left, right};
+}
+
+// tokenize (order: longest ops first)
+function tokenizeExpr(s){
+  s = s.replace(/\(/g,' ( ').replace(/\)/g,' ) ');
+  s = s.replace(/(<=|>=|==|!=|[+\-*/<>])/g,' $1 ');
+  return s.split(/\s+/).filter(Boolean);
+}
+
+function toRPN(tokens){
+  const out=[], ops=[];
+  const isOp = (t)=> (t in PREC) || CMP.has(t) || LOGOPS.has(t.toLowerCase()) || t==='u-' || t==='u!';
+  const prec = (t)=> (t==='u-')?4 : (t==='u!')?LOGPREC['u!'] :
+    (t in PREC)?PREC[t] : (LOGOPS.has(t.toLowerCase())? LOGPREC[t.toLowerCase()] : -1);
+
+  for(let i=0;i<tokens.length;i++){
+    let t=tokens[i];
+    const tl=t.toLowerCase();
+
+    // unary detect: minus / not
+    if(t==='-'){
+      const prev=tokens[i-1];
+      if(i===0 || (prev && isOp(prev)) || prev==='(') t='u-';
+    }
+    if(tl==='not') t='u!';
+
+    if(t==='(') { ops.push(t); continue; }
+    if(t===')'){
+      while(ops.length && ops[ops.length-1] !== '(') out.push(ops.pop());
+      if(!ops.length) throw new Error('mismatched )');
+      ops.pop(); continue;
+    }
+
+    if (CMP.has(t) || LOGOPS.has(tl) || (t in PREC) || t==='u-' || t==='u!'){
+      if (CMP.has(t)) { while(ops.length) out.push(ops.pop()); ops.push(t); continue; }
+      while(ops.length && isOp(ops[ops.length-1]) && prec(ops[ops.length-1])>=prec(t)) out.push(ops.pop());
+      ops.push(t); continue;
+    }
+
+    out.push(t);
+  }
+  while(ops.length) out.push(ops.pop());
+  return out;
+}
+
+function rpnToAst(rpn){
+  const st=[];
+  for(const t of rpn){
+    const tl = t.toLowerCase();
+    if(t==='u-' || t==='u!'){
+      const a = pop1(st, t);
+      st.push({type:(t==='u-'?'neg':'not'), a});
+    } else if (CMP.has(t)) {
+      const {left, right} = pop2(st, t);
+      st.push({type:'cmp', op:t, left, right});
+    } else if (LOGOPS.has(tl)) {
+      const {left, right} = pop2(st, tl);
+      st.push({type:'bool', op:tl, left, right});
+    } else if (t in PREC) {
+      const {left, right} = pop2(st, t);
+      st.push({type:'bin', op:t, left, right});
+    } else {
+      st.push({type:'leaf', v:t});
+    }
+  }
+  if(st.length!==1) throw new Error('bad AST: leftover tokens (check expression)');
+  return st[0];
+}
+
+function containsReal(node){
+  if(!node) return false;
+  if(node.type==='leaf') return isNumber(node.v) && isRealLike(node.v);
+  if(node.type==='neg') return containsReal(node.a);
+  return containsReal(node.left) || containsReal(node.right);
+}
+
+function formatVal(tok, forceReal){
+  if(forceReal && isNumber(tok) && !isRealLike(tok)) return tok+".0";
+  return tok;
+}
+
+// boolean codegen — leaves are identifiers
+function compileBool(node, lines){
+  switch(node.type){
+    case 'leaf':
+      lines.push(`A     ${node.v}`); return;
+    case 'not':
+      if (!node.a) throw new Error('syntax error: NOT without operand');
+      if (node.a.type==='leaf') { lines.push(`AN    ${node.a.v}`); return; }
+      compileBool(node.a, lines); lines.push('NOT'); return;
+    case 'bool':
+      if (node.op==='and'){
+        compileBool(node.left, lines);
+        if (node.right.type==='not' && node.right.a?.type==='leaf') {
+          lines.push(`AN    ${node.right.a.v}`);
+        } else {
+          compileBool(node.right, lines);
+        }
+        return;
+      } else { // or
+        compileBool(node.left, lines);
+        if (node.right.type==='leaf') { lines.push(`O     ${node.right.v}`); }
+        else if (node.right.type==='not' && node.right.a?.type==='leaf') { lines.push(`ON    ${node.right.a.v}`); }
+        else { compileBool(node.right, lines); }
+        return;
+      }
+    default: throw new Error('bool codegen: unknown node');
+  }
+}
+
+// arithmetic codegen
+function compileValue(node, lines, forceReal){
+  switch(node.type){
+    case 'leaf':
+      lines.push(`L     ${formatVal(node.v, forceReal)}`); return;
+    case 'neg':
+      lines.push(forceReal? 'L     0.0' : 'L     0');
+      compileValue(node.a, lines, forceReal);
+      lines.push(forceReal? '-R' : '-I');
+      return;
+    case 'bin': {
+      const opmap = { '+': forceReal? '+R':'+I', '-': forceReal? '-R':'-I',
+                      '*': forceReal? '*R':'*I', '/': forceReal? '/R':'/I' };
+      if (node.right.type === 'leaf') {
+        compileValue(node.left, lines, forceReal);
+        lines.push(`L     ${formatVal(node.right.v, forceReal)}`);
+        lines.push(opmap[node.op]);
+        return;
+      }
+      if ((node.op==='+'||node.op==='*') && node.left.type==='leaf') {
+        compileValue(node.right, lines, forceReal);
+        lines.push(`L     ${formatVal(node.left.v, forceReal)}`);
+        lines.push(opmap[node.op]);
+        return;
+      }
+      compileValue(node.left, lines, forceReal);
+      lines.push('T     #_t0');
+      compileValue(node.right, lines, forceReal);
+      lines.push('L     #_t0');
+      lines.push(opmap[node.op]);
+      return;
+    }
+  }
+}
+
+function compileComparison(node, lhs, lines){
+  const forceReal = containsReal(node.left) || containsReal(node.right);
+  const cmpOp = { '==':'EQ', '!=':'NE', '<':'LT', '<=':'LE', '>':'GT', '>=':'GE' }[node.op] + (forceReal? 'R':'I');
+  if(node.right.type==='leaf'){
+    compileValue(node.left, lines, forceReal);
+    lines.push(`L     ${formatVal(node.right.v, forceReal)}`);
+    lines.push(cmpOp);
+    lines.push(`=     ${lhs}`);
+    return;
+  }
+  compileValue(node.left, lines, forceReal);
+  lines.push('T     #_t0');
+  compileValue(node.right, lines, forceReal);
+  lines.push('L     #_t0');
+  lines.push(cmpOp);
+  lines.push(`=     ${lhs}`);
+}
+
+// ---------- forward: Pseudocode → AWL ----------
+function splitAssignment(s){
+  for (let i = 0; i < s.length; i++){
+    if (s[i] !== '=') continue;
+    const prev = s[i-1] || '';
+    const next = s[i+1] || '';
+    const inComparator = (prev === '<' || prev === '>' || prev === '!') || next === '=';
+    if (!inComparator) return [s.slice(0, i), s.slice(i+1)];
+  }
+  return [s, ''];
+}
+
+function transpileLine(line){
+  const s = stripComment(line).trim().replace(/;$/,'');
+  if(!s) return '';
+  if(!s.includes('=')) return `// skip: ${s}`;
+  const [lhsRaw, rhsRaw] = splitAssignment(s);
+  const lhs = (lhsRaw||'').trim();
+  const rhs = (rhsRaw||'').trim();
+  const toks = tokenizeExpr(rhs);
+  let ast;
+  try {
+    const rpn = toRPN(toks);
+    ast = rpnToAst(rpn);
+  } catch(e){
+    throw new Error(`${e.message} in expression: '${rhs}'`);
+  }
+  const out=[];
+  if(ast.type==='cmp'){
+    compileComparison(ast, lhs, out);
+  } else if (ast.type==='bool' || ast.type==='not' || (ast.type==='leaf' && /^[A-Za-z_]/.test(ast.v))) {
+    compileBool(ast, out);
+    out.push(`=     ${lhs}`);
+  } else {
+    const forceReal = containsReal(ast);
+    compileValue(ast, out, forceReal);
+    out.push(`T     ${lhs}`);
+  }
+  return out.join('\n');
+}
+
+function pseudocodeToAwl(src){
+  const lines = src.split(/\r?\n/).filter(l => l.trim().length > 0);
+  return lines.map(transpileLine).join("\n\n");
+}
+
+// ---------- reverse: AWL → Pseudocode (best-effort for our emitted forms) ----------
+const CMP_MAP_REV = {
+  'EQI':'==', 'EQR':'==', 'NEI':'!=', 'NER':'!=',
+  'LTI':'<',  'LTR':'<',  'LEI':'<=', 'LER':'<=',
+  'GTI':'>',  'GTR':'>',  'GEI':'>=', 'GER':'>='
+};
+const ARITH_REV = { '+I':'+', '-I':'-', '*I':'*', '/I':'/', '+R':'+', '-R':'-', '*R':'*', '/R':'/' };
+
+function splitBlocks(awl){
+  const out=[]; let cur=[];
+  for (const raw of awl.split(/\r?\n/)) {
+    const line = stripComment(raw).trim();
+    if (!line) { if (cur.length){ out.push(cur); cur=[]; } continue; }
+    cur.push(line);
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+function tryArithmeticBlock(block){
+  // Pattern: (L ... [op])* ... T var
+  const st=[];
+  for (let i=0;i<block.length;i++){
+    const line = block[i];
+    if (line.startsWith('L ')) {
+      st.push(line.replace(/^L\s+/, '').trim());
+      continue;
+    }
+    const mOp = line.match(/^([+\-*/][IR])$/);
+    if (mOp){
+      const op = ARITH_REV[mOp[0]];
+      const b = st.pop(), a = st.pop();
+      if (!a || !b) return null;
+      st.push(`(${a} ${op} ${b})`);
+      continue;
+    }
+    const mT = line.match(/^T\s+(.+)$/);
+    if (mT){
+      const varName = mT[1].trim();
+      const expr = st.pop();
+      if (!expr || st.length) return null;
+      return `${varName} = ${expr.replace(/^\((.*)\)$/,'$1')}`;
+    }
+    // unknown line → not arithmetic
+    return null;
+  }
+  return null;
+}
+
+function tryCompareBlock(block){
+  // Pattern our emitter makes:
+  // [compile left...]
+  // L <right>
+  // <CMP{I|R}>
+  // = <lhs>
+  const last = block[block.length-1];
+  const mAssign = last && last.startsWith('= ') ? last.slice(1).trim() : null;
+  if (!mAssign) return null;
+
+  // Find a CMP line before the final '='
+  let cmpIdx = -1, cmpCode = null;
+  for (let i=block.length-2;i>=0;i--){
+    const m = block[i].replace(/\s+/g,'').match(/^(EQ|NE|LT|LE|GT|GE)(I|R)$/);
+    if (m){ cmpIdx = i; cmpCode = m[0]; break; }
+  }
+  if (cmpIdx < 1) return null;
+
+  const op = CMP_MAP_REV[cmpCode];
+  // Right must be loaded just before CMP (L <right>)
+  const mRight = block[cmpIdx-1]?.match(/^L\s+(.+)$/);
+  if (!mRight) return null;
+  const right = mRight[1].trim();
+
+  // Everything before that builds the left; reconstruct roughly by reading the stack from L/op pairs
+  const left = tryArithmeticBlock(block.slice(0, cmpIdx-1)) ?? guessLeftVar(block.slice(0, cmpIdx-1));
+  if (!left) return null;
+
+  return `${mAssign} = ${left} ${op} ${right}`;
+}
+
+function guessLeftVar(lines){
+  // fallback: last 'L name' wins
+  for (let i=lines.length-1;i>=0;i--){
+    const m = lines[i].match(/^L\s+(.+)$/);
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+
+function tryBooleanBlock(block){
+  // Pattern: A <id> / AN <id> / O <id> / ON <id> ... then '= <lhs>'
+  const last = block[block.length-1];
+  if (!last || !last.startsWith('= ')) return null;
+  const lhs = last.slice(1).trim();
+
+  const terms = [];
+  for (let i=0;i<block.length-1;i++){
+    const line = block[i];
+    let m;
+    if (m = line.match(/^A[N]?\s+(.+)$/)) {
+      const neg = line.startsWith('AN');
+      terms.push({op:'and', val:(neg?'not ':'') + m[1].trim()});
+    } else if (m = line.match(/^O[N]?\s+(.+)$/)) {
+      const neg = line.startsWith('ON');
+      terms.push({op:'or', val:(neg?'not ':'') + m[1].trim()});
+    } else if (line === 'NOT') {
+      // rare general NOT; attach to previous value
+      if (terms.length) terms[terms.length-1].val = 'not ('+terms[terms.length-1].val+')';
+    } else {
+      // unknown → give up
+      return null;
+    }
+  }
+  if (!terms.length) return null;
+
+  // Fold terms: first 'and' chain until first 'or', then join respecting basic precedence (and > or)
+  const parts = [];
+  let curAnd = [];
+  for (const t of terms){
+    if (t.op === 'and') curAnd.push(t.val);
+    else { // or
+      if (curAnd.length) { parts.push(curAnd.length>1 ? '('+curAnd.join(' and ')+')' : curAnd[0]); curAnd=[]; }
+      parts.push('|OR|'+t.val);
+    }
+  }
+  if (curAnd.length) parts.push(curAnd.length>1 ? '('+curAnd.join(' and ')+')' : curAnd[0]);
+  const expr = parts.join(' ').replace(/\s*\|OR\|\s*/g,' or ');
+  return `${lhs} = ${expr}`;
+}
+
+function awlToPseudocode(src){
+  const blocks = splitBlocks(src);
+  const out = [];
+  for (const b of blocks){
+    let s = tryArithmeticBlock(b) || tryCompareBlock(b) || tryBooleanBlock(b);
+    if (!s){
+      // fallback: echo block as a comment to show it round-tripped loosely
+      s = '// unsupported block:\n// ' + b.join('\n// ');
+    }
+    out.push(s);
+  }
+  return out.join('\n\n');
+}
+
+// ---------- UI Wiring ----------
+const $ = (id)=>document.getElementById(id);
+const pseudoEl = $('pseudo');
+const awlEl = $('awl');
+const statusEl = $('status');
+const autoPseudo = $('autoPseudo');
+const autoAwl = $('autoAwl');
+
+const demoPseudo = `// Arithmetic
+X = 2 + 3 * 4 - (1 + 1)
+Ok = Speed * 2.0 >= 100.0
+Test = Speed < 100
+Schleife = Start and not Stop`;
+pseudoEl.value = demoPseudo;
+
+let _updating = false;
+
+function runToAwl(){ 
+  if (_updating) return;
+  try{ 
+    _updating = true;
+    awlEl.value = pseudocodeToAwl(pseudoEl.value); 
+    status('OK: pseudo → AWL'); 
+  } catch(e){ 
+    awlEl.value = `// error: ${e.message}`; 
+    status('Error (pseudo → AWL)'); 
+  } finally { _updating = false; }
+}
+
+function runToPseudo(){
+  if (_updating) return;
+  try{
+    _updating = true;
+    pseudoEl.value = awlToPseudocode(awlEl.value);
+    status('OK: AWL → pseudo');
+  } catch(e){
+    pseudoEl.value = `// error: ${e.message}`;
+    status('Error (AWL → pseudo)');
+  } finally { _updating = false; }
+}
+
+function status(s){ statusEl.textContent = s; clearTimeout(status._t); status._t = setTimeout(()=> statusEl.textContent='', 2000); }
+
+$('toAwl').onclick = runToAwl;
+$('toPseudo').onclick = runToPseudo;
+$('clearPseudo').onclick = ()=>{ pseudoEl.value=''; };
+$('clearAwl').onclick = ()=>{ awlEl.value=''; };
+$('swap').onclick = ()=>{ const a=pseudoEl.value; pseudoEl.value=awlEl.value; awlEl.value=a; };
+
+pseudoEl.addEventListener('input', ()=>{ if (autoPseudo.checked) runToAwl(); });
+awlEl.addEventListener('input', ()=>{ if (autoAwl.checked) runToPseudo(); });
+
+runToAwl();
+</script>
+
+
+
+</body>
+</html>
