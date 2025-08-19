@@ -1,0 +1,13 @@
+{
+  "name": "pseudocode_to_awl",
+  "version": "1.0.0",
+  "description": "This repository contains a small Python script that converts simple pseudo code / structured text to **AWL** instructions (the Siemens S7 PLC assembly language).",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module"
+}
