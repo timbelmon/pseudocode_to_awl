@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pseudocode ⇄ AWL Translator</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #f5f5f5; color: #333; }
+    .container { display: flex; height: 100vh; }
+    textarea { flex: 1; padding: 1rem; border: none; resize: none; font-family: monospace; font-size: 1rem; }
+    textarea:focus { outline: none; }
+    .left { border-right: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <textarea id="pseudocode" class="left" placeholder="Pseudocode"></textarea>
+    <textarea id="awl" placeholder="AWL"></textarea>
+  </div>
+  <script type="module" src="./dist/main.js"></script>
+</body>
+</html>
